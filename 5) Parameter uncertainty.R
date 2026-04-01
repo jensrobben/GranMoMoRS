@@ -16,16 +16,16 @@ invisible(sapply(packages, require, character.only = TRUE))
 setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
 
 # Load
-load("Results/EMresult_tau10.RDATA")
+load("Results/EMresult_tau1.RDATA")
 
 
 ##### 1) Parameter estimates RS model -----
 
-# Object
+### Object
 obj[[length(obj)]] <- NULL
 iteropt <- length(obj)
 
-# Iteration results
+### Iteration results
 alpha1.iter <- do.call('rbind', lapply(obj, function(x) x$alpha.1))
 alpha2.iter <- do.call('rbind', lapply(obj, function(x) x$alpha.2))
 beta0.iter  <- do.call('rbind', lapply(obj, function(x) x$beta.0))
@@ -37,8 +37,11 @@ U.iter      <- do.call('rbind', lapply(obj, function(x) x$U))
 theta.iter <- cbind(alpha1.iter, alpha2.iter, beta0.iter, 
                     beta11.iter, beta22.iter, gamma.iter)
 
+### Optimal parameter vector
+
 # Length vector
-d <- ncol(theta.iter) - 2
+d <- ncol(alpha1.iter) + ncol(alpha2.iter) + ncol(beta0.iter) + 
+  ncol(beta11.iter) + ncol(beta22.iter) + ncol(gamma.iter) - 2
 
 # Optimal parameter vector
 alpha1.opt <- alpha1.iter[iteropt,]
@@ -48,7 +51,7 @@ beta01.opt <- beta0.opt[1:ncol(xx01)]
 beta02.opt <- beta0.opt[-c(1:ncol(xx01))]
 beta11.opt <- beta11.iter[iteropt,]
 beta22.opt <- beta22.iter[iteropt,]
-gamma.opt  <- gamma.iter[iteropt,1] 
+gamma.opt  <- gamma.iter[iteropt,1] # g2 set at zero (g3 st g1 + g3 = 0)
 U.opt      <- U.iter[iteropt,]
 
 alpha.opt  <- c(alpha1.opt, alpha2.opt)
@@ -60,32 +63,36 @@ theta.opt  <- unname(c(alpha1.opt, alpha2.opt, beta0.opt, beta11.opt,
 
 # Gradient functions
 S.alpha   <- function(alpha, b01, b02, b1, b2, dtsim){
-  # Length vectors
-  ln   <- sapply(list(alpha1.opt, alpha2.opt), function(v) length(v))
+  ln <- sapply(list(alpha1.opt, alpha2.opt), function(v) length(v))
   cln  <- c(1,cumsum(ln))
   
-  # Parameter values
   a1  <- alpha[c(cln[1]):cln[2]]
   a2  <- alpha[c(cln[2]+1):cln[3]]
   b0  <- c(b01, b02)
   b11 <- b1
   b22 <- b2
   
-  # Conditional Poisson densities
+  ##### Expectation-step
+  
+  ### (1.1) Conditional densities (Poisson)
   x1a1  <- sapply(1:dim(x1)[3], function(j) x1[,,j] %*% a1)
   x2a2  <- sapply(1:dim(x2)[3], function(j) x2[,,j] %*% a2)
-  fdts1 <- matrix(dpois(dtsim, lambda = bt), nrow = nT*nA, ncol = R)
-  fdts2 <- matrix(dpois(dtsim, lambda = bt * exp(x1a1)), nrow = nT*nA, ncol = R)
-  fdts3 <- matrix(dpois(dtsim, lambda = bt * exp(x2a2)), nrow = nT*nA, ncol = R)
+  fdts1 <- dpois(dt, lambda = bt)
+  fdts2 <- dpois(dt, lambda = bt * exp(x1a1))
+  fdts3 <- dpois(dt, lambda = bt * exp(x2a2))
   fdts  <- cbind(fdts1, fdts2, fdts3)
   
   # Change 0 values by very small positive value to avoid numerical issues
-  fdts[which(fdts == 0)] <- 10^(-30)
+  fdts1[which(fdts1 == 0)] <- 10^(-300)
+  fdts2[which(fdts2 == 0)] <- 10^(-300)
+  fdts3[which(fdts3 == 0)] <- 10^(-300)
+  fdts[which(fdts == 0)]   <- 10^(-300)
   
-  x1b01 <- pen01 + sapply(1:R, function(r) xx01[,,r] %*% b01 + U.opt[r])
-  x2b02 <- pen02 + sapply(1:R, function(r) xx02[,,r] %*% b02 + U.opt[r]) 
-  x1b11 <- pen11 + sapply(1:R, function(r) xx11[,,r] %*% b11 + U.opt[r])
-  x2b22 <- pen22 + sapply(1:R, function(r) xx22[,,r] %*% b22 + U.opt[r]) 
+  ### (1.2) Transition probabilities
+  x1b01 <- pen01 + sapply(1:R, function(r) t(t(xx01[,,r])) %*% b01 + U.opt[r])
+  x2b02 <- pen02 + sapply(1:R, function(r) t(t(xx02[,,r])) %*% b02 + U.opt[r]) 
+  x1b11 <- pen11 + sapply(1:R, function(r) t(t(xx11[,,r])) %*% b11 + U.opt[r])
+  x2b22 <- pen22 + sapply(1:R, function(r) t(t(xx22[,,r])) %*% b22 + U.opt[r]) 
   
   # All info
   exp.x1b01 <- exp(x1b01) 
@@ -103,26 +110,26 @@ S.alpha   <- function(alpha, b01, b02, b1, b2, dtsim){
   p20 <- 1/(1 + exp.x2b22)
   p22 <- exp.x2b22/(1 + exp.x2b22)
   
-  # avoid numerical issues
-  p00[which(p00 == 0)] <- 10^(-300)
-  p01[which(p01 == 0)] <- 10^(-300)
-  p02[which(p02 == 0)] <- 10^(-300)
-  p10[which(p10 == 0)] <- 10^(-300)
-  p11[which(p11 == 0)] <- 10^(-300)
-  p20[which(p20 == 0)] <- 10^(-300)
-  p22[which(p22 == 0)] <- 10^(-300)
+  # # avoid numerical issues
+  # p00[which(p00 == 0)] <- 10^(-300)
+  # p01[which(p01 == 0)] <- 10^(-300)
+  # p02[which(p02 == 0)] <- 10^(-300)
+  # p10[which(p10 == 0)] <- 10^(-300)
+  # p11[which(p11 == 0)] <- 10^(-300)
+  # p20[which(p20 == 0)] <- 10^(-300)
+  # p22[which(p22 == 0)] <- 10^(-300)
   
   P <- unname(cbind(p00, p01, p02, p10, p11, p11*0, p20, p22*0, p22))
   P[1,] <- NA
   
-  # Calculate joint state probabilities
+  ###### (2) Calculate joint state probabilities
   lst <- rep(list(list('a' = rep(NA, R*9),
                        'b' = rep(NA, R),
                        'c' = rep(NA, R*9))),nT)
   
   for(t in 2:nT){
     if(t == 2) {
-      gR <- rep(gamma.iter[iteropt,], each = R)
+      gR <- rep(c(gamma.opt,0,1-gamma.opt), each = R)
       a <- rep(Rfast::colprods(fdts[t + nT*(1:nA-1),]), times = 3) * P[t,] * 
         c(rep(gR[1:R], times = 3), rep(gR[(R+1):(2*R)], times = 3),
           rep(gR[(2*R+1):(3*R)], times = 3))
@@ -133,7 +140,7 @@ S.alpha   <- function(alpha, b01, b02, b1, b2, dtsim){
     }
     
     b <- rowSums(matrix(a, nrow = R))
-    b[b == 0] <- 10^(-30)
+    b[b == 0] <- 10^(-300)
     c <- a/rep(b, times = 9)
     
     if(any(is.na(c))) stop('na')
@@ -151,20 +158,25 @@ S.alpha   <- function(alpha, b01, b02, b1, b2, dtsim){
                          sapply(1:R, function(j) rowSums(js.prob[-1,c(R+j,4*R+j,7*R+j)])),
                          sapply(1:R, function(j) rowSums(js.prob[-1,c(2*R+j,5*R+j,8*R+j)]))))
   
-  ###  Derivatives
+  ##### Derivatives
   id   <- 1 + nT*(0:(nA-1))
   
-  # Alpha 1
-  msprob1 <- do.call('rbind', replicate(nA, ms.prob[-1,(R+1):(2*R)], 
-                                        simplify = FALSE))
-  vec1    <- (- bt[-id,] * exp(x1a1[-id,]) + dtsim[-id,]) * msprob1
-  res1    <- apply(x1[-id,,], 2, function(x) sum(x * vec1)) %>% unname()
+  # ### Gamma
+  # res0 <- c(sum(ms.prob[1,1:R]/g) - sum((ms.prob[1,(2*R+1):(3*R)])/(1-g)))
+  # # res0 <- c(sum(log(fdts1[id,]/fdts3[id,])) + R * log(g[1]/(1 - sum(g))), 
+  # #           sum(log(fdts2[id,]/fdts3[id,])) + R * log(g[2]/(1 - sum(g))))
   
-  # Alpha 2
-  msprob2 <- do.call('rbind', replicate(nA, ms.prob[-1,(2*R+1):(3*R)], 
+  ### Alpha 1
+  msprob1 <- do.call('rbind', replicate(nA, ms.prob[,(R+1):(2*R)], 
                                         simplify = FALSE))
-  vec2    <- (- bt[-id,] * exp(x2a2[-id,]) + dtsim[-id,]) * msprob2
-  res2    <- apply(x2[-id,,], 2, function(x) sum(x * vec2)) %>% unname()
+  vec1    <- (- bt * exp(x1a1) + dtsim) * msprob1
+  res1    <- apply(x1, 2, function(x) sum(x * vec1)) %>% unname()
+  
+  ### Alpha 2
+  msprob2 <- do.call('rbind', replicate(nA, ms.prob[,(2*R+1):(3*R)], 
+                                        simplify = FALSE))
+  vec2    <- (- bt * exp(x2a2) + dtsim) * msprob2
+  res2    <- apply(x2, 2, function(x) sum(x * vec2)) %>% unname()
   
   # Derivatives
   c(res1, res2)
@@ -180,21 +192,27 @@ S.beta   <- function(beta, a1, a2, g, dtsim){
   b11 <- beta[c(cln[3]+1):cln[4]]
   b22 <- beta[c(cln[4]+1):cln[5]]
   
-  # Conditional Poisson densities
+  ##### Expectation-step
+  
+  ### (1.1) Conditional densities (Poisson)
   x1a1  <- sapply(1:dim(x1)[3], function(j) x1[,,j] %*% a1)
   x2a2  <- sapply(1:dim(x2)[3], function(j) x2[,,j] %*% a2)
-  fdts1 <- matrix(dpois(dtsim, lambda = bt), nrow = nT*nA, ncol = R)
-  fdts2 <- matrix(dpois(dtsim, lambda = bt * exp(x1a1)), nrow = nT*nA, ncol = R)
-  fdts3 <- matrix(dpois(dtsim, lambda = bt * exp(x2a2)), nrow = nT*nA, ncol = R)
+  fdts1 <- dpois(dt, lambda = bt)
+  fdts2 <- dpois(dt, lambda = bt * exp(x1a1))
+  fdts3 <- dpois(dt, lambda = bt * exp(x2a2))
   fdts  <- cbind(fdts1, fdts2, fdts3)
   
   # Change 0 values by very small positive value to avoid numerical issues
-  fdts[which(fdts == 0)] <- 10^(-30)
+  fdts1[which(fdts1 == 0)] <- 10^(-300)
+  fdts2[which(fdts2 == 0)] <- 10^(-300)
+  fdts3[which(fdts3 == 0)] <- 10^(-300)
+  fdts[which(fdts == 0)]   <- 10^(-300)
   
-  x1b01 <- pen01 + sapply(1:R, function(r) xx01[,,r] %*% b01 + U.opt[r])
-  x2b02 <- pen02 + sapply(1:R, function(r) xx02[,,r] %*% b02 + U.opt[r]) 
-  x1b11 <- pen11 + sapply(1:R, function(r) xx11[,,r] %*% b11 + U.opt[r])
-  x2b22 <- pen22 + sapply(1:R, function(r) xx22[,,r] %*% b22 + U.opt[r]) 
+  ### (1.2) Transition probabilities
+  x1b01 <- pen01 + sapply(1:R, function(r) t(t(xx01[,,r])) %*% b01 + U.opt[r])
+  x2b02 <- pen02 + sapply(1:R, function(r) t(t(xx02[,,r])) %*% b02 + U.opt[r]) 
+  x1b11 <- pen11 + sapply(1:R, function(r) t(t(xx11[,,r])) %*% b11 + U.opt[r])
+  x2b22 <- pen22 + sapply(1:R, function(r) t(t(xx22[,,r])) %*% b22 + U.opt[r]) 
   
   # All info
   exp.x1b01 <- exp(x1b01) 
@@ -212,26 +230,26 @@ S.beta   <- function(beta, a1, a2, g, dtsim){
   p20 <- 1/(1 + exp.x2b22)
   p22 <- exp.x2b22/(1 + exp.x2b22)
   
-  # avoid numerical issues
-  p00[which(p00 == 0)] <- 10^(-300)
-  p01[which(p01 == 0)] <- 10^(-300)
-  p02[which(p02 == 0)] <- 10^(-300)
-  p10[which(p10 == 0)] <- 10^(-300)
-  p11[which(p11 == 0)] <- 10^(-300)
-  p20[which(p20 == 0)] <- 10^(-300)
-  p22[which(p22 == 0)] <- 10^(-300)
+  # # avoid numerical issues
+  # p00[which(p00 == 0)] <- 10^(-300)
+  # p01[which(p01 == 0)] <- 10^(-300)
+  # p02[which(p02 == 0)] <- 10^(-300)
+  # p10[which(p10 == 0)] <- 10^(-300)
+  # p11[which(p11 == 0)] <- 10^(-300)
+  # p20[which(p20 == 0)] <- 10^(-300)
+  # p22[which(p22 == 0)] <- 10^(-300)
   
   P <- unname(cbind(p00, p01, p02, p10, p11, p11*0, p20, p22*0, p22))
   P[1,] <- NA
   
-  # Calculate joint state probabilities
+  ###### (2) Calculate joint state probabilities
   lst <- rep(list(list('a' = rep(NA, R*9),
                        'b' = rep(NA, R),
                        'c' = rep(NA, R*9))),nT)
   
   for(t in 2:nT){
     if(t == 2) {
-      gR <- rep(c(g,0, 1-sum(g)-10^(-30)), each = R)
+      gR <- rep(c(g,0,1-g), each = R)
       a <- rep(Rfast::colprods(fdts[t + nT*(1:nA-1),]), times = 3) * P[t,] * 
         c(rep(gR[1:R], times = 3), rep(gR[(R+1):(2*R)], times = 3),
           rep(gR[(2*R+1):(3*R)], times = 3))
@@ -260,7 +278,7 @@ S.beta   <- function(beta, a1, a2, g, dtsim){
                          sapply(1:R, function(j) rowSums(js.prob[-1,c(R+j,4*R+j,7*R+j)])),
                          sapply(1:R, function(j) rowSums(js.prob[-1,c(2*R+j,5*R+j,8*R+j)]))))
   
-  ### Derivatives
+  ##### Derivatives
   
   ### Beta's
   
@@ -270,9 +288,9 @@ S.beta   <- function(beta, a1, a2, g, dtsim){
                        (js.prob[-1,(3*R+1):(4*R)] + js.prob[-1,(4*R+1):(5*R)]) * 
                        p10[-1,]*(1-p10[-1,]) + 
                        (js.prob[-1,(6*R+1):(7*R)] + js.prob[-1,(8*R+1):(9*R)]) * 
-                       p20[-1,]*(1-p20[-1,])))
-  H2 <- Q
-  H <- H1 + H2
+                       p20[-1,]*(1-p20[-1,]))) 
+  H2 <- Q 
+  H <- (H1 + H2) 
   
   sgm.b01.log.pt00 <- sapply(1:dim(xx01)[2], function(j) 
     - sum(xx01[-1,j,] * p01[-1,] * js.prob[-1,1:R]))
@@ -331,7 +349,6 @@ S.beta   <- function(beta, a1, a2, g, dtsim){
   res3
 }
 
-# Check if gradient is approx zero around optimal parameter values
 S.alpha(alpha = alpha.opt, b01 = beta01.opt, b02 = beta02.opt,
         b1 = beta11.opt, b2 = beta22.opt, dtsim = dt) %>% unname()
 S.beta(beta = beta.opt, a1 = alpha1.opt, a2 = alpha2.opt, 
@@ -408,9 +425,9 @@ obj <- foreach(k = 1:B, .options.snow = opts) %dopar% {
   Dt    <- lapply(1:R, gen_st_dt)
   Dt    <- do.call('cbind', lapply(Dt, function(x) x$Dt[,1]))
   
-  # Perturbations
-  eps1 <- 10^(-6)
-  eps2 <- 10^(-8)
+  # Epsilons
+  eps1 <- 10^(-10)
+  eps2 <- 10^(-10)
   
   # Perturbations
   Dlt1 <- (rbinom(n = length(alpha.opt), size = 1, p = 0.5)*2 - 1)*eps1
@@ -436,6 +453,7 @@ obj <- foreach(k = 1:B, .options.snow = opts) %dopar% {
   
   list('alpha' = Hk1, 'beta' = Hk2)
 }
+
 stopCluster(cl)
 
 # Save

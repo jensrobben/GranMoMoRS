@@ -7,7 +7,8 @@ gc()
 # Load packages
 packages <- c('dplyr','sf','ncdf4','lubridate','tidyverse','tibble',
               'Polychrome','tidyr','ISOweek', 'ggplot2','RColorBrewer',
-              'data.table', 'viridis', 'imputeTS', 'eurostat', 'RCurl')
+              'data.table', 'viridis', 'imputeTS', 'eurostat', 'RCurl',
+              "eurostat")
 invisible(sapply(packages, require, character.only = TRUE))
 `%notin%` <- Negate(`%in%`)
 
@@ -41,30 +42,31 @@ shapef3    <- shapefile[shapefile$LEVL_CODE == 3,]
 
 ##### 2) Read hospital data ----
 # URL to OpenDataSoft for hospital data relating to COVID-19 epidemic
-url_ha <- paste0('https://public.opendatasoft.com/api/explore/v2.1/catalog/',
-                 'datasets/donnees-hospitalieres-covid-19-dep-france/exports/csv')
+file_ha <- 'Data/OPENDATA/donnees-hospitalieres-covid-19-dep-france.csv'
 
 # Read csv file
-df_ha <- read.csv(url_ha, sep = ";") 
+df_ha <- read.csv(file = file_ha, sep = ';')
 
 # One missing department name, but corresponds to Collectivity of Saint-Martin (overseas)
-unique(df_ha$nom_dep_min[which(! df_ha$nom_dep_min %in% shapef3$NUTS_NAME)])
+unique(df_ha$Nom.département[which(! df_ha$Nom.département %in% shapef3$NUTS_NAME)])
 
 # Go from NUTS 3 to former French NUTS 2 regions
 df <- df_ha %>%
-  dplyr::left_join(shapef3, by = c('nom_dep_min' = 'NUTS_NAME')) %>%
-  dplyr::filter(sex == "Tous") %>%
-  arrange(date, NUTS_ID) %>%
-  dplyr::select(c('date','NUTS_ID', 'day_hosp_new')) %>%
+  dplyr::left_join(shapef3, by = c('Nom.département' = 'NUTS_NAME')) %>%
+  dplyr::filter(Sexe == "Tous") %>%
+  arrange(Date, NUTS_ID) %>%
+  dplyr::select(c('Date','NUTS_ID', 'Nb.actuellement.hospitalisés',
+                  'Nb.actuellement.en.soins.intensifs',
+                  'Nb.Quotidien.Admis.Hospitalisation')) %>%
   mutate(NUTS2_ID = substr(NUTS_ID, 1, 4),
-         Date     = as.Date(date),
-         ISOYear  = isoyear(date),
-         ISOWeek  = isoweek(date))
+         Date     = as.Date(Date),
+         ISOYear  = isoyear(Date),
+         ISOWeek  = isoweek(Date))
 
 # Group information by week
 df <- df %>% 
   group_by(ISOYear, ISOWeek, NUTS2_ID) %>%
-  reframe(New.Hosp = sum(day_hosp_new, na.rm = TRUE)) %>%
+  reframe(New.Hosp = sum(Nb.Quotidien.Admis.Hospitalisation, na.rm = TRUE)) %>%
   mutate(Date = ISOweek2date(paste0(ISOYear,'-W', 
                                     ifelse(ISOWeek < 10, paste0('0',ISOWeek),
                                            ISOWeek), '-',1)), .before = 1)
@@ -72,28 +74,30 @@ df <- df %>%
 
 ##### 3) Population data ----
 # Download
-P.xt.all <- get_eurostat(id = 'demo_r_d2jan', cache = FALSE,
-                         compress_file = FALSE, time_format = 'raw')
+P.xt.all <- fread(paste0('Data/EUROSTAT/demo_r_d2jan.tsv'), sep = '\t',
+                  header = TRUE) %>% 
+  separate(col = "freq,unit,sex,age,geo\\TIME_PERIOD", 
+           into = c('Freq', 'Unit', 'Sex', 'Age', 'Region'), sep = ',') 
 
 # Pre-process
 P.xt.c <- P.xt.all %>% 
-  dplyr::filter(geo %in% sort(unique(df$NUTS2_ID)),
-                age %notin% c('UNK','TOTAL')) %>%
-  dplyr::select(-c('freq','unit')) %>%
-  mutate(ISOYear = as.integer(TIME_PERIOD),
-         Age = factor(age, levels = c('Y_LT1', paste0('Y',seq(1,99,1)), 'Y_OPEN')),
+  dplyr::filter(Region %in% sort(unique(df$NUTS2_ID)),
+                Age %notin% c('UNK','TOTAL')) %>%
+  dplyr::select(-c('Freq','Unit')) %>%
+  tidyr::gather(key = 'Time', value = 'Pop', - c(Sex, Age, Region)) %>%
+  mutate(ISOYear = as.integer(Time),
+         Age = factor(Age, levels = c('Y_LT1', paste0('Y',seq(1,99,1)), 'Y_OPEN')),
          .before = 1) %>%
-  dplyr::select(-c('TIME_PERIOD', 'age')) %>% 
-  arrange(sex, ISOYear, Age) %>%
-  dplyr::filter(!grepl(':', values),
-                as.integer(Age) >= 66, ISOYear <= 2024, ISOYear >= 2020, sex == 'T')
+  dplyr::select(-c('Time')) %>% 
+  arrange(Sex, ISOYear, Age) %>%
+  dplyr::filter(!grepl(':', Pop),
+                as.integer(Age) >= 66, ISOYear <= 2024, ISOYear >= 2020, Sex == 'T')
 
-colnames(P.xt.c) <- c('ISOYear', 'Age', 'Sex', 'Region', 'Pop')
-
+# Pre-process
+P.xt.c$Pop <- readr::parse_number(P.xt.c$Pop) %>% as.integer()
 P.xt.c$Age <- droplevels(P.xt.c$Age)
 
-Pt <- P.xt.c %>% 
-  ungroup() %>%
+Pt <- P.xt.c %>% ungroup() %>%
   group_by(ISOYear, Region) %>%
   reframe('Pop' = sum(as.numeric(Pop))) 
 

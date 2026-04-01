@@ -19,8 +19,8 @@ setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
 options(dplyr.summarise.inform = FALSE)
 
 # All times and ISO week/year information
-t_min <- as.Date('2013-01-01', format = '%Y-%m-%d') # Start of ISO week 1 in 2013
-t_max <- as.Date('2024-06-30', format = '%Y-%m-%d') # End of ISO week 26 in 2024
+t_min <- as.Date('2010-01-01', format = '%Y-%m-%d') # Start of ISO week 1 in 2013
+t_max <- as.Date('2024-10-01', format = '%Y-%m-%d') # End of ISO week 26 in 2024
 
 time_frame <- seq(t_min, t_max, by="days")
 df_itime   <- data.frame('Date' = time_frame, 'ISOWeek' = isoweek(time_frame),
@@ -51,12 +51,6 @@ ind.rm    <- unlist(sapply(overseas, function(x)
 shapef    <- shapef[-c(ind.rm), ] %>%
   dplyr::arrange(NUTS_ID)
 
-# Box long lat coordinates where country falls into
-coords_ctry <- st_coordinates(st_transform(shapef, 4326)) %>% 
-  as.data.frame() %>% dplyr::select('X','Y')
-long.range <- range(coords_ctry[,1])
-lat.range  <- range(coords_ctry[,2])
-
 ##### 2) Load daily temperature data + weekly transformation ----
 
 # Read processed temperature data
@@ -77,13 +71,18 @@ excess_temp <- function(r){
   pred.tg <- predict(fitr.tg, dfsub.daily)
   
   # Quantiles
-  qtg <- quantile(dfsub.daily$tg, c(0.05, 0.95), na.rm = TRUE)
+  qtg1 <- quantile(dfsub.daily$tg, c(0.025, 0.975), na.rm = TRUE)
+  qtg2 <- quantile(dfsub.daily$tg, c(0.050, 0.950), na.rm = TRUE)
+  qtg3 <- quantile(dfsub.daily$tg, c(0.100, 0.900), na.rm = TRUE)
 
   # Information
-  dd <- data.frame(Date    = dfsub.daily$Date, Region = dfsub.daily$Region,
-                   tg_anom = dfsub.daily$tg - pred.tg,
-                   Tind95  = (dfsub.daily$tg > qtg[2])*1,
-                   Tind5   = (dfsub.daily$tg < qtg[1])*1)
+  dd <- data.frame(Date = dfsub.daily$Date, Region = dfsub.daily$Region,
+                   EHI1     = pmax(0, dfsub.daily$tg - qtg1[2]),
+                   ECI1     = pmax(0, qtg1[1] - dfsub.daily$tg),
+                   EHI2     = pmax(0, dfsub.daily$tg - qtg2[2]),
+                   ECI2     = pmax(0, qtg2[1] - dfsub.daily$tg),
+                   EHI3     = pmax(0, dfsub.daily$tg - qtg3[2]),
+                   ECI3     = pmax(0, qtg3[1] - dfsub.daily$tg))
   dd
 }
 
@@ -93,10 +92,13 @@ df.t       <- df.t %>% left_join(df.exc.t)
 
 # Transform to weekly - on ISO week basis
 df.t.w <- df.t %>% group_by(ISOYear, ISOWeek, Region) %>%
-  summarize(w_avg_tg      = mean(tg), 
-            w_avg_tg_anom = mean(tg_anom), 
-            w_avg_Tind95  = mean(Tind95), 
-            w_avg_Tind5   = mean(Tind5)) %>%
+  summarize(w_avg_tg    = mean(tg), 
+            w_avg_ehi1  = mean(EHI1),
+            w_avg_eci1  = mean(ECI1), 
+            w_avg_ehi2  = mean(EHI2),
+            w_avg_eci2  = mean(ECI2), 
+            w_avg_ehi3  = mean(EHI3),
+            w_avg_eci3  = mean(ECI3)) %>%
   ungroup() 
 
 ##### 3) Influenza activity ----
@@ -123,19 +125,16 @@ df_ia$ia100q  <- pmax(df_ia$ia100 - quantile(df_ia$ia100, 0.75), 0)
 # Read data on hospitalizations for COVID-19
 df_hosp <- readRDS(file = 'Data/OPENDATA/Hosp_NUTS2.rds')
 
-# Quantile excess
-df_hosp$Nhospq  <- pmax(df_hosp$Nhosp - 
-                          quantile(df_hosp$Nhosp[
-                            df_hosp$Date > as.Date('2020-03-16')], 0.75))
-
 ##### 5) Combine all data sets ----
 df <- df.t.w %>%
   left_join(df_ia,   by = c('ISOYear', 'ISOWeek', 'Region' = 'NUTS_ID')) %>%
-  left_join(df_hosp, by = c('ISOYear', 'ISOWeek', 'Date', 'Region' = 'NUTS2_ID')) 
+  left_join(df_hosp, by = c('ISOYear', 'ISOWeek', 'Date', 'Region' = 'NUTS2_ID')) %>%
+  dplyr::filter(is.na(w_avg_tg) == FALSE)
 
+# Hospital admission (missing -> 0)
 df$Nhosp[is.na(df$Nhosp)]   <- 0
-df$Nhospq[is.na(df$Nhospq)] <- 0
 
-file <- paste0('Data/df_NUTS2_FR.rds')
+# Save
+file <- paste0('Results/df_NUTS2_FR.rds')
 saveRDS(df, file)
 

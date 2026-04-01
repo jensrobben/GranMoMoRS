@@ -119,35 +119,6 @@ P.xt.c <- P.xt.c %>%
   dplyr::filter(Sex == "T") %>%
   dplyr::select(-c(Sex))
 
-# Extrapolation for up to the year 2025 (January 1)
-list.FR <- P.xt.c %>% 
-  split(~ Region + Age) 
-newdf   <- as.data.frame(matrix(nrow = 0, ncol = 4))
-colnames(newdf) <- c('ISOYear', 'Age', 'Region', 'Pop')
-
-for(s in names(list.FR)){
-  # Population counts for region r
-  sub   <- list.FR[[s]]
-  
-  # LM fit
-  lmr <- mgcv::gam(Pop ~ s(ISOYear), data = sub)
-  
-  # Missing year(s)
-  years   <- year(t_min):(year(t_max)+1)
-  missing <- years[!years %in% sub$ISOYear]
-  
-  # Prediction on missing year(s)
-  pred    <- predict(lmr, newdata = data.frame(ISOYear = missing))
-  
-  # Add to new data frame
-  newdf <- rbind(newdf, data.frame('ISOYear' = missing, 
-                                   'Region'  = substr(s,1,4),
-                                   'Age'     = substr(s,6,15), 
-                                   'Pop'     = pred))
-}
-
-P.xt.c <- rbind(P.xt.c, newdf)
-
 # Create weekly exposures from population count
 E.xt.c <- P.xt.c %>% 
   dplyr::group_by(Age, Region) %>% 
@@ -174,10 +145,8 @@ df.d <- df.d %>%
 ##### 4) Fit penalized Poisson GLM ----
 
 # Arrange data set
-df.d <- df.d %>% 
-  arrange(Date, Region, Age)
-shapef <- shapef %>% 
-  arrange(NUTS_ID)
+df.d <- df.d %>% dplyr::arrange(Date, Region, Age)
+shapef <- shapef %>% dplyr::arrange(NUTS_ID)
 
 # Add Fourier terms
 df <- df.d %>%
@@ -191,6 +160,23 @@ df$Region <- factor(df$Region, levels = regions)
 
 # Create year-indicator (t = 0,1,2,..)
 df$Time <- df$ISOYear  - min(df$ISOYear)
+
+# Outlier detection in baseline
+grid <- expand.grid(unique(df$Region), unique(df$Age)) %>%
+  `colnames<-`(c("Region", "Age")) %>%
+  dplyr::arrange(Region)
+
+for(i in 1:nrow(grid)){
+  # Subset
+  sub <- df %>%
+    dplyr::filter(Region == grid$Region[i], Age == grid$Age[i]) 
+  
+  # Outlier detection using STL decomposition
+  result <- tsclean(ts(sub$Deaths, frequency = 52)) %>% as.numeric()
+  
+  df[df$Region == grid$Region[i] & 
+       df$Age == grid$Age[i], 'Deaths_f'] <- round(result)
+}
 
 # Formulas
 formula0 <- Deaths ~ -1 + Region:Age
@@ -237,14 +223,11 @@ for(a in 1:nA){
 # Formula for gam fit
 formula <- Deaths ~ -1 + M0 + M1 + M2 + M3 + M4 + M5
 
-# Remove extreme COVID-19 weeks
-dfs <- df %>% dplyr::filter(! (ISOYear == 2020 & ISOWeek %in% 13:16))
-
 # Baseline fit
-fit2 <- mgcv::gam(formula, offset = log(dfs$Expo), data = dfs,
+fit2 <- mgcv::gam(formula, offset = log(df$Expo), data = df,
                   family = poisson(link = 'log'),
                   control = list(epsilon = 10^(-5), trace = TRUE,
-                                 newton = list(conv.tol = 1e-5), nthreads = 10),
+                                 newton = list(conv.tol = 1e-5), nthreads = 5),
                     drop.intercept = TRUE,
                   paraPen = list(M0 = list(ADJ, rank = nA*nR, sp = -1),
                                  M1 = list(ADJ, rank = nA*nR, sp = -1),

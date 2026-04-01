@@ -16,13 +16,7 @@ invisible(sapply(packages, require, character.only = TRUE))
 setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
 
 # Load
-load("Results/EMresult_tau10.RDATA")
-
-# rm(list=setdiff(ls(), c('obj','R','nA','nT','dt','bt','df','pen1','pen2',
-#                         'x1','x2','xx1','xx2', 'indl0', 'indl1', 'indl2',
-#                         'fit1','fit2', 'Q', 'cov', 'pt.00', 'pt.01', 'pt.02',
-#                         'pt.10', 'pt.11', 'pt.20', 'pt.22', 'obj.alpha.1',
-#                         'obj.alpha.2','obj.beta', 'ms.prob')))
+load("Results/EMresult_tau1.RDATA")
 
 
 ##### 1) Fisher information -----

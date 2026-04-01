@@ -56,7 +56,7 @@ regions <- sort(unique(shapef$NUTS_ID))
 ##### 2) Load data sets -----
 
 # Features
-df.feat    <- readRDS('Data/df_NUTS2_FR.rds')
+df.feat    <- readRDS('Results/df_NUTS2_FR.rds')
 df.bDeaths <- readRDS('Results/df_bDeaths.rds')
 
 df <- df.bDeaths %>% 
@@ -223,8 +223,8 @@ coords <- data.frame('long' = c(-4,9), 'lat' = c(41.5, 51.3)) %>%
 
 p3.5.1 <- ggplot(df %>% dplyr::filter(Date == '2022-08-01')) + 
   theme_bw(base_size = 15) +
-  ggtitle(bquote('Hot-week index (2022-08-01)')) + 
-  geom_sf(aes(geometry = geometry, fill = w_avg_Tind95), col = 'gray80') + 
+  ggtitle(bquote('Excess heat index (2022-08-01)')) + 
+  geom_sf(aes(geometry = geometry, fill = w_avg_ehi2), col = 'gray80') + 
   geom_sf(data = borders$geom1, aes(), col = 'gray80', fill = NA) + 
   scale_fill_viridis_c(option = 'rocket', begin = 0.2, end = 1, direction = -1,
                        name = '', guide = guide_colorbar(barwidth = 10)) +  
@@ -236,8 +236,8 @@ p3.5.1
 
 p3.5.2 <- ggplot(df %>% dplyr::filter(Date == '2013-01-14')) + 
   theme_bw(base_size = 15) +
-  ggtitle(bquote('Cold-week index (2013-01-14)')) + 
-  geom_sf(aes(geometry = geometry, fill = w_avg_Tind5), col = 'gray80') + 
+  ggtitle(bquote('Excess cold index (2013-01-14)')) + 
+  geom_sf(aes(geometry = geometry, fill = w_avg_eci2), col = 'gray80') + 
   geom_sf(data = borders$geom1, aes(), col = 'gray80', fill = NA) + 
   scale_fill_gradientn(colours = pal, name = '', limits = NULL,
                        guide = guide_colorbar(barwidth = 10)) + 

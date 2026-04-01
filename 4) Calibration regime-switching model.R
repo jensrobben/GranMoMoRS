@@ -18,14 +18,6 @@ setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
 # Suppress summarise info
 options(dplyr.summarise.inform = FALSE)
 
-# All times and ISO week/year information
-t_min <- as.Date('2013-01-01', format = '%Y-%m-%d') # Start of ISO week 1 in 2013
-t_max <- as.Date('2024-06-30', format = '%Y-%m-%d') # End of ISO week 26 in 2024
-
-time_frame <- seq(t_min, t_max, by="days")
-df_itime   <- data.frame('Date' = time_frame, 'ISOWeek' = isoweek(time_frame),
-                         'ISOYear' = isoyear(time_frame))
-
 # Colour scales
 ablue  <- '#56B4E9'
 agreen <- '#A3D596'
@@ -56,38 +48,48 @@ regions <- sort(unique(shapef$NUTS_ID))
 ##### 2) Load data sets and preprocess -----
 
 # Merge mortality data with feature data set
-df.feat    <- readRDS('Data/df_NUTS2_FR.rds')
+df.feat    <- readRDS('Results/df_NUTS2_FR.rds')
 df.bDeaths <- readRDS('Results/df_bDeaths.rds')
 
 df <- df.bDeaths %>% 
   left_join(df.feat, 
-            by = c('Date', 'ISOYear', 'ISOWeek', 'Region')) 
+            by = c('Date', 'ISOYear', 'ISOWeek', 'Region')) %>%
+  na.omit()
+
+# Quantile excess hospital admission
+df$Nhospq  <- pmax(df$Nhosp - quantile(df$Nhosp[df$Date > as.Date('2020-03-16')], 0.75))
+
+# Filter dataset and select threshold quantile
+vars <- c('ia100q', 'Nhospq', 'w_avg_ehi2', 'w_avg_eci2')
+df   <- df %>%
+  dplyr::select(all_of(c('Date', 'ISOYear', 'ISOWeek', 'Region', 'geo_name', 
+                         'Age', 'Deaths', 'Expo', 'bDeaths', 'avg_ia100', vars)))
+colnames(df)[grepl('w_avg_', colnames(df), fixed = TRUE)] <- c('w_avg_ehi', 'w_avg_eci')
 
 # Create lagged features
-vars <- c('w_avg_tg_anom', 'w_avg_Tind95', 'w_avg_Tind5', 
-          'ia100', 'ia100q', 'Nhosp', 'Nhospq')
-
+vars <- c('ia100q', 'Nhospq', 'w_avg_ehi', 'w_avg_eci')
 for(v in vars){
   df <- df %>% 
     group_by(Region, Age) %>%
     mutate(!!paste0(v,'_l1')   := lag(!!sym(v), 1),
-           !!paste0(v,'_l2')   := lag(!!sym(v), 2),
-           !!paste0(v,'_l0.1') := (lag(!!sym(v), 0) + lag(!!sym(v), 1))/2,
            !!paste0(v,'_l2.3') := (lag(!!sym(v), 2) + lag(!!sym(v), 3))/2) %>% 
     ungroup()
 }
 
-
 # State restrictions (from state 0 -> 1)
-df$penalty01 <- ifelse(df$w_avg_Tind95 > 0, 0, -1000)
+df$penalty01 <- ifelse(df$w_avg_ehi > 0, 0, -1000)
+df$penalty02 <- ifelse(df$ia100q > 0 | df$Nhospq > 0 | df$w_avg_eci > 0 | 
+                         df$ia100q_l1 | df$Nhospq_l1 > 0 | df$w_avg_eci_l1 > 0,
+                       0, -1000)
 
 # Remove missing observations (weeks 1-3 of year 2019)
 df <- df %>% na.omit()
 
 # Arrange data frame by (Region, Age, Time)
 df <- df %>% 
-  dplyr::arrange(Region, Age, Date) %>%
-  mutate(Region = as.factor(Region))
+  dplyr::arrange(Region, Age, ISOYear, ISOWeek) %>%
+  mutate(Region = as.factor(Region),
+         Time = ISOYear - min(ISOYear))
 
 ##### 3) ICAR process for spatial effect ----
 
@@ -100,14 +102,14 @@ diag(adjmat)       <- sapply(1:nrow(adjmat), function(x) sum(adjmat[,x] != 0))
 # ICAR set-up
 D   <- diag(diag(adjmat))
 W   <- - (adjmat - D)
-tau <- 10
+tau <- 1
 Q   <- tau * (D - W)
 cov <- MASS::ginv(Q)
 
 # Function to calculate Moore-Penroze generalized determinant
 det.mp <- function(x) {
   sigma <- zapsmall(svd(x)$d)  
-  prod(sigma[sigma != 0])       # Product of the nonzero singular values
+  prod(sigma[sigma != 0])       
 }
 
 ##### 4) Design matrices -----
@@ -117,60 +119,65 @@ R   <- length(unique(df$Region))
 nA  <- length(unique(df$Age))
 nT  <- nrow(df)/(nA*R)
 
-# Group consecutive age groups (to limit model complexity)
-df$Age0 <- df$Age
-df$Age  <- plyr::mapvalues(df$Age0, from = c('Y65-69','Y70-74','Y75-79',
-                                             'Y80-84','Y85-89','Y_GE90'),
-                           to = c('Y65-74','Y65-74','Y75-84','Y75-84',
-                                  'Y_GE85','Y_GE85'))
-df$Age <- factor(df$Age, levels = c('Y65-74','Y75-84','Y_GE85'))
-
 # State-specific Poisson model specifications
-form1.0 <- as.formula(Deaths ~ -1 + offset(log(bDeaths)) + w_avg_tg_anom:Age + 
-                        w_avg_tg_anom_l1:Age + w_avg_tg_anom_l2:Age)
-m10     <- model.matrix(form1.0, data = df)
-x1      <- simplify2array(lapply(1:R, function(j) m10[(nA*nT*(j-1) + 1):(nA*nT*j),]))
+# State 1
+form1.0 <- as.formula(Deaths ~ offset(log(bDeaths)) + 
+                        w_avg_ehi:Age + 
+                        w_avg_ehi_l1:Age)
+fit1.0  <- glm(form1.0, 
+               data = df, family = poisson(link = 'log'))
+m10     <- model.matrix(fit1.0)
+x1      <- simplify2array(lapply(1:R, function(j) 
+  matrix(m10[(nA*nT*(j-1) + 1):(nA*nT*j),], ncol = ncol(m10))))
+alpha.1 <- unname(fit1.0$coefficients)
 
-form2.0 <- as.formula(Deaths ~ -1 + offset(log(bDeaths)) + 
-                        w_avg_Tind5_l0.1:Age +  w_avg_Tind5_l2.3:Age + 
-                        ia100q_l0.1:Age + ia100q_l2.3:Age + 
-                        Nhospq_l0.1:Age + Nhospq_l2.3:Age)
-m20     <- model.matrix(form2.0, data = df)
-x2      <- simplify2array(lapply(1:R, function(j) m20[(nA*nT*(j-1) + 1):(nA*nT*j),]))
+# State 2
+form2.0 <- as.formula(Deaths ~ offset(log(bDeaths)) + 
+                        w_avg_eci:Age + 
+                        ia100q:Age + 
+                        Nhospq:Age + 
+                        w_avg_eci_l1:Age +
+                        ia100q_l1:Age + 
+                        Nhospq_l1:Age + 
+                        w_avg_eci_l2.3:Age + 
+                        ia100q_l2.3:Age +
+                        w_avg_eci:Nhospq:Age + 
+                        w_avg_eci_l1:Nhospq_l1:Age)
+fit2.0  <- glm(form2.0, data = df, family = poisson(link = 'log'))
+m20     <- model.matrix(fit2.0)
+x2      <- simplify2array(lapply(1:R, function(j) 
+  matrix(m20[(nA*nT*(j-1) + 1):(nA*nT*j),], ncol = ncol(m20))))
+alpha.2 <- unname(fit2.0$coefficients)
 
-
-# Transition model matrices (age-independent)
-m01 <- model.matrix( ~ offset(log(bDeaths)) + w_avg_Tind95,
-                    data = df %>% dplyr::filter(Age0 == 'Y_GE90'))
+# Transition model matrices
+m01 <- model.matrix(Deaths ~ offset(log(bDeaths)) + w_avg_ehi,
+                    data = df %>% dplyr::filter(Age == 'Y_GE90'))
 xx01 <- simplify2array(lapply(1:R, function(j) 
   matrix(m01[(nT*(j-1) + 1):(nT*j),], ncol = ncol(m01))))
 
-m11 <- model.matrix( ~ offset(log(bDeaths)) + 
-                      w_avg_Tind95 + w_avg_Tind95_l1 + w_avg_Tind95_l2,
-                    data = df %>% dplyr::filter(Age0 == 'Y_GE90'))
-xx11 <- simplify2array(lapply(1:R, function(j) m11[(nT*(j-1) + 1):(nT*j),]))
+m11 <- model.matrix(Deaths ~ offset(log(bDeaths)) + w_avg_ehi,
+                    data = df %>% dplyr::filter(Age == 'Y_GE90'))
+xx11 <- simplify2array(lapply(1:R, function(j) 
+  matrix(m11[(nT*(j-1) + 1):(nT*j),], ncol = ncol(m11))))
 
-m02 <- model.matrix( ~ offset(log(bDeaths)) + 
-                      ia100q_l0.1 + Nhospq_l0.1,
-                    data = df %>% dplyr::filter(Age0 == 'Y_GE90'))
-xx02 <- simplify2array(lapply(1:R, function(j) m02[(nT*(j-1) + 1):(nT*j),]))
+m02 <- model.matrix(Deaths ~ offset(log(bDeaths)) + w_avg_eci,
+                    data = df %>% dplyr::filter(Age == 'Y_GE90'))
+xx02 <- simplify2array(lapply(1:R, function(j) 
+  matrix(m02[(nT*(j-1) + 1):(nT*j),], ncol = ncol(m02))))
 
-m22 <- model.matrix( ~ offset(log(bDeaths)) + 
-                      ia100q_l0.1 + Nhospq_l0.1 +
-                      ia100q_l2.3 + Nhospq_l2.3,
-                    data = df %>% dplyr::filter(Age0 == 'Y_GE90'))
-xx22 <- simplify2array(lapply(1:R, function(j) m22[(nT*(j-1) + 1):(nT*j),]))
+m22 <- model.matrix(Deaths ~ offset(log(bDeaths)) + w_avg_eci_l2.3,
+                    data = df %>% dplyr::filter(Age == 'Y_GE90'))
+xx22 <- simplify2array(lapply(1:R, function(j) 
+  matrix(m22[(nT*(j-1) + 1):(nT*j),], ncol = ncol(m22))))
 
-# Initial parameter estimates
-alpha.1 <- rep(0, ncol(x1))
-alpha.2 <- rep(0, ncol(x2))
+# Transition probs
 beta.01 <- rep(0, dim(xx01)[2])
 beta.02 <- rep(0, dim(xx02)[2])
 beta.0  <- c(beta.01, beta.02)
 beta.11 <- rep(0, dim(xx11)[2])
 beta.22 <- rep(0, dim(xx22)[2])
 
-# Initial marginal state probabilities
+# Initial probs
 gamma.0 <- rep(0.3,R)
 gamma.1 <- rep(0,R)
 gamma.2 <- rep(0.7,R)
@@ -185,51 +192,49 @@ bt    <- matrix(df$bDeaths, nrow = nT*nA, ncol = R,
                 dimnames = list(NULL, regions))
 pen01 <- matrix(df$penalty01, nrow = nT*nA, ncol = R, 
                 dimnames = list(NULL, regions))
+pen02 <- matrix(df$penalty02, nrow = nT*nA, ncol = R, 
+                dimnames = list(NULL, regions))
 
 # Objective functions to be minimized in EM-algorithm
-obj.alpha.1 <- function(alpha, msprobs, xmat1, dtr, btr){
+obj.alpha.1 <- function(alpha, msprobs, xmat1 = x1[,,],
+                        dtr = dt, btr = bt, pen = NULL){
   Pt1  <- do.call('rbind', (replicate(6, msprobs, simplify = FALSE)))
-  x1a1 <- sapply(1:dim(xmat1)[3], function(j) xmat1[,,j] %*% alpha)
+  x1a1 <- sapply(1:dim(xmat1)[3], function(j) t(t(xmat1[,,j])) %*% alpha)
   Et1  <- exp(x1a1)
   
   - sum(Pt1 * (-btr*Et1 + dtr*x1a1 + dtr*log(btr) - lgamma(dtr+1)))
 }
-obj.alpha.2 <- function(alpha, msprobs, xmat2, dtr = dt, btr = bt){
+obj.alpha.2 <- function(alpha, msprobs, xmat2 = x2[,,],
+                        dtr = dt, btr = bt, pen = NULL){
   Pt2  <- do.call('rbind', (replicate(6, msprobs, simplify = FALSE)))
-  x2a2 <- sapply(1:dim(xmat2)[3], function(j) xmat2[,,j] %*% alpha)
+  x2a2 <- sapply(1:dim(xmat2)[3], function(j) t(t(xmat2[,,j])) %*% alpha)
   Et2  <- exp(x2a2)
   
   - sum(Pt2 * (-btr*Et2 + dtr*x2a2 + dtr*log(btr) - lgamma(dtr+1)))
 }
 obj.beta   <- function(beta, jsprobs, U, xmat01 = xx01, xmat02 = xx02,
                        xmat11 = xx11, xmat22 = xx22, dtr = dt, btr = bt, 
-                       pena01 = pen01, pena02 = 0, pena11 = 0, 
-                       pena22 = 0){
-  # Dimensions
-  i01   <- dim(xmat01)[2]
-  i11   <- dim(xmat11)[2]
-  i02   <- dim(xmat02)[2]
-  i22   <- dim(xmat22)[2]
+                       pena01 = pen01, pena02 = pen02, pena11 = pen11, 
+                       pena22 = pen22){
+  i01  <- dim(xmat01)[2]
+  i11  <- dim(xmat11)[2]
+  i02  <- dim(xmat02)[2]
+  i22  <- dim(xmat22)[2]
+  b01 <- beta[1:i01]
+  b02 <- beta[(i01+1):(i01+i02)]
+  b11 <- beta[(i01+i02+1):(i01+i02+i11)]
+  b22 <- beta[(i01+i02+i11+1):(i01+i02+i11+i22)]
+  x1b01 <- pena01 + sapply(1:R, function(r) t(t(xmat01[,,r])) %*% b01 + U[r])
+  x2b02 <- pena02 + sapply(1:R, function(r) t(t(xmat02[,,r])) %*% b02 + U[r]) 
+  x1b11 <- pena11 + sapply(1:R, function(r) t(t(xmat11[,,r])) %*% b11 + U[r])
+  x2b22 <- pena22 + sapply(1:R, function(r) t(t(xmat22[,,r])) %*% b22 + U[r]) 
   
-  # Parameters
-  b01   <- beta[1:i01]
-  b02   <- beta[(i01+1):(i01+i02)]
-  b11   <- beta[(i01+i02+1):(i01+i02+i11)]
-  b22   <- beta[(i01+i02+i11+1):(i01+i02+i11+i22)]
-  
-  # Linear predictor
-  x1b01 <- pena01 + sapply(1:R, function(r) xmat01[,,r] %*% b01 + U[r])
-  x2b02 <- pena02 + sapply(1:R, function(r) xmat02[,,r] %*% b02 + U[r]) 
-  x1b11 <- pena11 + sapply(1:R, function(r) xmat11[,,r] %*% b11 + U[r])
-  x2b22 <- pena22 + sapply(1:R, function(r) xmat22[,,r] %*% b22 + U[r]) 
-  
-  # Exponentiate
+  # All info
   exp.x1b01 <- exp(x1b01) 
   exp.x2b02 <- exp(x2b02)
   exp.x1b11 <- exp(x1b11) 
   exp.x2b22 <- exp(x2b22) 
   
-  # Transition probabilities
   p00 <- 1/(1 + exp.x1b01 + exp.x2b02)
   p01 <- exp.x1b01/(1 + exp.x1b01 + exp.x2b02)
   p02 <- exp.x2b02/(1 + exp.x1b01 + exp.x2b02)
@@ -240,7 +245,7 @@ obj.beta   <- function(beta, jsprobs, U, xmat01 = xx01, xmat02 = xx02,
   p20 <- 1/(1 + exp.x2b22)
   p22 <- exp.x2b22/(1 + exp.x2b22)
   
-  # Avoid numerical issues
+  # avoid numerical issues
   p00[which(p00 == 0)] <- 10^(-300)
   p01[which(p01 == 0)] <- 10^(-300)
   p02[which(p02 == 0)] <- 10^(-300)
@@ -251,22 +256,22 @@ obj.beta   <- function(beta, jsprobs, U, xmat01 = xx01, xmat02 = xx02,
   
   # Hessian
   H1 <- diag(colSums((jsprobs[-1,1:R] + jsprobs[-1,(R+1):(2*R)] +
-                        jsprobs[-1,(2*R+1):(3*R)]) * p00[-1,] * (1-p00[-1,]) + 
-                       (jsprobs[-1,(3*R+1):(4*R)] + jsprobs[-1,(4*R+1):(5*R)]) * 
-                       p10[-1,]*(1-p10[-1,]) + (jsprobs[-1,(6*R+1):(7*R)] + 
+                        jsprobs[-1,(2*R+1):(3*R)]) * p00[-1,] * (1-p00[-1,]) +
+                       (jsprobs[-1,(3*R+1):(4*R)] + jsprobs[-1,(4*R+1):(5*R)]) *
+                       p10[-1,]*(1-p10[-1,]) + (jsprobs[-1,(6*R+1):(7*R)] +
                                                   jsprobs[-1,(8*R+1):(9*R)]) * p20[-1,]*(1-p20[-1,])))
   H2 <- Q
   
   
-  # Log-likelihood
-  -sum(jsprobs[-1,1:R] * log(p00[-1,]) + 
-         jsprobs[-1,(R+1):(2*R)] * log(p01[-1,]) +
-         jsprobs[-1,(2*R+1):(3*R)] * log(p02[-1,]) + 
-         jsprobs[-1,(3*R+1):(4*R)] * log(p10[-1,]) + 
-         jsprobs[-1,(4*R+1):(5*R)] * log(p11[-1,]) +
-         jsprobs[-1,(6*R+1):(7*R)] * log(p20[-1,]) + 
-         jsprobs[-1,(8*R+1):(9*R)] * log(p22[-1,])) +
-    0.5*log(det.mp(H1+H2))
+  
+  - sum(jsprobs[-1,1:R] * log(p00[-1,]) + 
+          jsprobs[-1,(R+1):(2*R)] * log(p01[-1,]) +
+          jsprobs[-1,(2*R+1):(3*R)] * log(p02[-1,]) + 
+          jsprobs[-1,(3*R+1):(4*R)] * log(p10[-1,]) + 
+          jsprobs[-1,(4*R+1):(5*R)] * log(p11[-1,]) +
+          jsprobs[-1,(6*R+1):(7*R)] * log(p20[-1,]) + 
+          jsprobs[-1,(8*R+1):(9*R)] * log(p22[-1,])) + 
+    0.5*log(det.mp(H1 + H2))
 }
 obj.gamma <- function(gamma, msprobs, dens1, dens2, dens3){
   g1   <- gamma
@@ -274,15 +279,14 @@ obj.gamma <- function(gamma, msprobs, dens1, dens2, dens3){
   g3   <- 1 - g1 - g2
   gvec <- rep(c(g1, g2, g3), each = R)
   
-  ind.kp  <- which(! gvec == 0)
-  term.g0 <- - sum(msprobs[ind.kp] * log(gvec[ind.kp])) 
+  term.g0 <- - sum(msprobs * log(gvec + 10^(-300))) 
   term.g0
 }
 
 # Laplace-approximated log-likelihood (function of spatial effect vector)
-Uopt<- function(U){
+Uopt <- function(U){
   # Specs
-  nA <- length(unique(df$Age0))
+  nA <- length(unique(df$Age))
   nT <- length(unique(df$Date))
   R  <- length(U) + 1
   
@@ -290,41 +294,38 @@ Uopt<- function(U){
   U <- c(U, -sum(U))
   
   # Gamma
+  # Indices corresponding to first observation
   id  <- 1 + nT*(0:(nA-1))
+  
   g1 <- gamma[1]
   g2 <- 0 # do not start in state 1 (only in summer)
   g3 <- 1 - g1 - g2
   gamma <- rep(c(g1, g2, g3), each = R)
-  
-  term.g0 <- - sum(ms.prob[1,-c((R+1):(2*R))] * log(gamma[-c((R+1):(2*R))])) -
-    sum(ms.prob[1,1:R] * log(fdts1[id,])) - 
-    sum(ms.prob[1,(R+1):(2*R)] * log(fdts2[id,])) - 
-    sum(ms.prob[1,(2*R+1):(3*R)] * log(fdts3[id,]))
+  term.g0 <- - sum(ms.prob[1,] * log(gamma + 10^(-300)))
   
   # Alpha 0
   Pt0     <- do.call(rbind, replicate(nA, ms.prob[,1:R], simplify = FALSE))
-  term.a0 <- - sum(Pt0[-id,] * (-bt[-id,] + dt[-id,]*log(bt[-id,]) - lgamma(dt[-id,] + 1)))
+  term.a0 <- - sum(Pt0 * (-bt + dt * log(bt) - lgamma(dt + 1)))
   
   # Alpha 1
-  term.a1 <- obj.alpha.1(alpha.1, ms.prob[-1,(R+1):(2*R)], xmat1 = x1[-id,,],
-                         dtr = dt[-id,], btr = bt[-id,])
+  term.a1 <- obj.alpha.1(alpha.1, ms.prob[,(R+1):(2*R)], xmat1 = x1,
+                         dtr = dt, btr = bt)
   
   # Alpha 2
-  term.a2 <- obj.alpha.2(alpha.2, ms.prob[-1,(2*R+1):(3*R)], xmat2 = x2[-id,,],
-                         dtr = dt[-id,], btr = bt[-id,])
+  term.a2 <- obj.alpha.2(alpha.2, ms.prob[,(2*R+1):(3*R)], xmat2 = x2,
+                         dtr = dt, btr = bt)
   
   # Beta
   term.b <- obj.beta(beta = c(beta.0, beta.11, beta.22), jsprobs = js.prob, U = U,
                      xmat01 = xx01, xmat02 = xx02, xmat11 = xx11, xmat22 = xx22, 
-                     dtr = dt, btr = bt, pena01 = pen01, pena02 = 0,
-                     pena11 = 0, pena22 = 0)
+                     dtr = dt, btr = bt, pena01 = pen01, pena02 = pen02,
+                     pena11 = pen11, pena22 = pen22)
   
   # Total
   Reduce('+', list(term.g0, term.a0, term.a1, term.a2, term.b)) +
     0.5 * as.numeric(t(U) %*% Q %*% t(t(U))) + 
     0.5 * log(det.mp(cov))
 }
-
 
 ##### 6) Run the EM algorithm! ----
 
@@ -333,7 +334,7 @@ plst <- rep(list(NULL),7)
 names(plst) <- c('alpha.1', 'alpha.2', 'gamma', 'beta.0', 'beta.11', 'beta.22', 'U')
 obj <- list(plst)
 
-# Create index list (see loop) 
+# Create index list for for-loop in EM algorithm 
 create_ind_lst <- function(i) {
   unlist(rep(list((3*R*i+1):(3*R*i+R), (3*R*i+R+1):(3*R*i+2*R), 
                   (3*R*i+2*R+1):(3*R*i+3*R)),each = 3))
@@ -356,27 +357,30 @@ while(abs(ll0 - ll1) > 10^(-12)){
   iter  <- iter + 1
   
   # Conditional densities (Poisson)
-  x1a1  <- sapply(1:dim(x1)[3], function(j) x1[,,j] %*% alpha.1)
-  x2a2  <- sapply(1:dim(x2)[3], function(j) x2[,,j] %*% alpha.2)
-  fdts1 <- matrix(dpois(dt, lambda = bt), nrow = nT*nA, ncol = R)
-  fdts2 <- matrix(dpois(dt, lambda = bt * exp(x1a1)), nrow = nT*nA, ncol = R)
-  fdts3 <- matrix(dpois(dt, lambda = bt * exp(x2a2)), nrow = nT*nA, ncol = R)
+  x1a1  <- sapply(1:dim(x1)[3], function(j) t(t(x1[,,j])) %*% alpha.1)
+  x2a2  <- sapply(1:dim(x2)[3], function(j) t(t(x2[,,j])) %*% alpha.2)
+  fdts1 <- dpois(dt, lambda = bt)
+  fdts2 <- dpois(dt, lambda = bt * exp(x1a1))
+  fdts3 <- dpois(dt, lambda = bt * exp(x2a2))
   fdts  <- cbind(fdts1, fdts2, fdts3)
   
   # Change 0 values by very small positive value to avoid numerical issues
-  fdts[which(fdts == 0)] <- 10^(-30)
+  fdts1[which(fdts1 == 0)] <- 10^(-300)
+  fdts2[which(fdts2 == 0)] <- 10^(-300)
+  fdts3[which(fdts3 == 0)] <- 10^(-300)
+  fdts[which(fdts == 0)]   <- 10^(-300)
   
   # Transition model matrices
-  x1b01 <- sapply(1:dim(xx01)[3], function(j) xx01[,,j] %*% beta.01 + U.new[j])
-  x2b02 <- sapply(1:dim(xx02)[3], function(j) xx02[,,j] %*% beta.02 + U.new[j])
-  x1b11 <- sapply(1:dim(xx11)[3], function(j) xx11[,,j] %*% beta.11 + U.new[j])
-  x2b22 <- sapply(1:dim(xx22)[3], function(j) xx22[,,j] %*% beta.22 + U.new[j])
+  x1b01 <- sapply(1:dim(xx01)[3], function(j) t(t(xx01[,,j])) %*% beta.01 + U.new[j])
+  x2b02 <- sapply(1:dim(xx02)[3], function(j) t(t(xx02[,,j])) %*% beta.02 + U.new[j])
+  x1b11 <- sapply(1:dim(xx11)[3], function(j) t(t(xx11[,,j])) %*% beta.11 + U.new[j])
+  x2b22 <- sapply(1:dim(xx22)[3], function(j) t(t(xx22[,,j])) %*% beta.22 + U.new[j])
   
   # Calculate the transition probabilities
   pen01  <- pen01[1:nT,]
-  pen02  <- x2b02*0
-  pen11  <- x1b11*0
-  pen22  <- x2b22*0
+  pen02  <- pen02[1:nT,]
+  pen11  <- pen01*0
+  pen22  <- pen02*0
   pt.01 <- exp(pen01 + x1b01)/(1 + exp(pen01 + x1b01) + exp(pen02 + x2b02))
   pt.02 <- exp(pen02 + x2b02)/(1 + exp(pen01 + x1b01) + exp(pen02 + x2b02))
   pt.00 <- 1 - pt.01 - pt.02
@@ -389,8 +393,7 @@ while(abs(ll0 - ll1) > 10^(-12)){
   pt.22 <- exp(pen22 + x2b22)/(1 + exp(pen22 + x2b22))
   pt.20 <- 1 - pt.22
   
-  P <- unname(cbind(pt.00, pt.01, pt.02, pt.10, pt.11, 
-                    pt.12, pt.20, pt.21, pt.22))
+  P <- unname(cbind(pt.00, pt.01, pt.02, pt.10, pt.11, pt.12, pt.20, pt.21, pt.22))
   P[1,] <- NA
   
   # Calculate joint state probabilities (check paper for iterative procedure)
@@ -410,7 +413,7 @@ while(abs(ll0 - ll1) > 10^(-12)){
     }
     
     b <- rowSums(matrix(a, nrow = R))
-    b[b == 0] <- 10^(-30)
+    b[b == 0] <- 10^(-300)
     c <- a/rep(b, times = 9)
     
     if(any(is.na(c))) stop('na')
@@ -420,7 +423,6 @@ while(abs(ll0 - ll1) > 10^(-12)){
     lst[[t]][['c']][1:(9*R)] <- c
   }
   
-  # From joint to marginal
   js.prob <- do.call('rbind', lapply(1:length(lst), function(x) lst[[x]][['c']]))
   ms.prob <- rbind(c(sapply(1:R, function(j) sum(js.prob[2,c(j,R+j,2*R+j)])),
                      sapply(1:R, function(j) sum(js.prob[2,c(3*R+j,4*R+j,5*R+j)])),
@@ -436,44 +438,42 @@ while(abs(ll0 - ll1) > 10^(-12)){
   
   # Alpha 0
   Pt0     <- do.call(rbind, replicate(nA, ms.prob[,1:R], simplify = FALSE))
-  term.a0 <- - sum(Pt0[-id,] * (-bt[-id,] + dt[-id,]*log(bt[-id,]) - lgamma(dt[-id,] + 1)))
+  term.a0 <- - sum(Pt0 * log(fdts1))
   
   # Gamma
   fit0 <- optim(par = gamma[1], fn = obj.gamma, msprobs = ms.prob[1,],
                 dens1 = fdts1, dens2 = fdts2, dens3 = fdts3,
-                control = list(reltol = 10^(-16)), method = 'Brent',
-                lower = 0.001, upper = 0.999)
+                control = list(factr = 10^(-14)),
+                method = 'L-BFGS-B', lower = 0.001, upper = 0.999)
   g1 <- fit0$par
-  g2 <- 0 
+  g2 <- 0 # do not start in state 1 (only in summer)
   g3 <- 1 - g1 - g2
   gamma <- rep(c(g1, g2, g3), each = R)
-  term.g0 <- - sum(ms.prob[1,-c((R+1):(2*R))] * log(gamma[-c((R+1):(2*R))])) -
-    sum(ms.prob[1,1:R] * log(fdts1[id,])) - 
-    sum(ms.prob[1,(R+1):(2*R)] * log(fdts2[id,])) - 
-    sum(ms.prob[1,(2*R+1):(3*R)] * log(fdts3[id,]))
+  term.g0 <- fit0$value
   
   # Alpha 1
   fit1 <- glm(form1.0,
-              family = poisson(link = 'log'), data = df[-c(1 + nT*(0:(nA*R-1))),],
-              start = alpha.1, control = list(epsilon = 10^(-16)),
-              weights = as.vector(do.call('rbind', replicate(nA, ms.prob[-1,(R+1):(2*R)], 
-                                                             simplify = FALSE))))
+              family = poisson(link = 'log'), 
+              data = df,
+              start = alpha.1, 
+              control = list(epsilon = 10^(-14)),
+              weights = as.vector(do.call('rbind', replicate(nA, ms.prob[,(R+1):(2*R)], simplify = FALSE))))
   alpha.1 <- fit1$coefficients
   
   # Alpha 2
   fit2 <- glm(form2.0,
-              family = poisson(link = 'log'), data = df[-c(1 + nT*(0:(nA*R-1))),],
-              start = alpha.2, control = list(epsilon = 10^(-16)),
-              weights = as.vector(do.call('rbind', replicate(nA, ms.prob[-1,(2*R+1):(3*R)], 
-                                                             simplify = FALSE))))
+              family = poisson(link = 'log'), data = df,
+              start = alpha.2,
+              control = list(epsilon = 10^(-14)),
+              weights = as.vector(do.call('rbind', replicate(nA, ms.prob[,(2*R+1):(3*R)], simplify = FALSE))))
   alpha.2 <- fit2$coefficients
   
-  # Beta's
+  # Transition parameters
   fit3 <- optim(par = c(beta.0, beta.11, beta.22), fn = obj.beta, U = U.new,
                 jsprobs = js.prob, xmat01 = xx01, xmat02 = xx02, xmat11 = xx11, 
-                xmat22 = xx22, dtr = dt, btr = bt, pena01 = pen01[1:nT,],
-                pena02 = pen02[1:nT,], pena11 = pen11[1:nT,], pena22 = pen22[1:nT,],
-                method = 'BFGS', control = list(reltol = 10^(-6)))
+                xmat22 = xx22, dtr = dt, btr = bt, pena01 = pen01,
+                pena02 = pen02, pena11 = pen11, pena22 = pen22,
+                method = 'BFGS', control = list(reltol = 10^(-14)))
   
   beta.0  <- fit3$par[1:length(beta.0)]
   beta.01 <- fit3$par[1:length(beta.01)]
@@ -481,14 +481,12 @@ while(abs(ll0 - ll1) > 10^(-12)){
   beta.11 <- fit3$par[(length(beta.01)+length(beta.02)+1):(length(beta.01) + length(beta.02) + length(beta.11))]
   beta.22 <- fit3$par[(length(beta.01)+length(beta.02)+length(beta.11)+1):(length(beta.01) + length(beta.02) + length(beta.11) + length(beta.22))]
   
-  # Update spatial effect
-  if(abs(Uopt(U.new[-R]) - ll0)/ll0 > 10^(88)){
-    U.fit <- optim(par = U.new[-R], fn = Uopt, method = 'BFGS', 
-                   control = list(reltol = 10^(-12)))
-    U.new <- c(U.fit$par, -sum(U.fit$par))
-    ll1   <- U.fit$value
+  if(abs(Uopt(U.new[-R]) - ll0)/ll0 > 10^(-8)){
+    test <- nlm(f = Uopt, p = U.new[-R])
+    U.new <- c(test$estimate, -sum(test$estimate))
+    ll1   <- test$minimum
   } else{
-    ll1 <- Uopt(U.new[-R])
+   ll1 <- Uopt(U.new[-R])
   }
   
   # Store results
@@ -504,79 +502,12 @@ while(abs(ll0 - ll1) > 10^(-12)){
   print(c(abs(ll0-ll1), round(ll1, 10)))
 }
 
+# AIC, BIC
+npar <- ncol(x1) + ncol(x2) + ncol(xx01) + ncol(xx02) + 
+  ncol(xx11) + ncol(xx22)
+bic  <- as.numeric(2*ll1 + log(nrow(df)) * (npar))
+c(npar, bic)
+
 # Save output + global environment
 saveRDS(object = obj, file = paste0('Results/EMoutput_tau', tau, '.rds'))
 save(list = ls(.GlobalEnv), file = paste0("Results/EMresult_tau", tau, ".Rdata"))
-
-##### 7) Visualisations ----
-
-# Load global environment
-load(paste0("Results/EMresult_tau", tau, ".Rdata"))
-
-# Summarize results
-tab1 <- data.frame()
-tab1 <- data.frame('Date'    = df$Date, 
-                   'Deaths'  = df$Deaths,
-                   'bDeaths' = df$bDeaths,
-                   'Region'  = df$Region,
-                   'Age'     = df$Age0,
-                   'Prob0'   = as.vector(apply(ms.prob[,1:R], 1, mean)),
-                   'Prob1'   = as.vector(apply(ms.prob[,(R+1):(2*R)], 1, mean)), 
-                   'Prob2'   = as.vector(apply(ms.prob[,(2*R+1):(3*R)], 1, mean)),
-                   'Tind95'  = df$w_avg_Tind95, 
-                   'Flu'     = (df$ia100 - min(df$ia100))/(max(df$ia100) - min(df$ia100)),
-                   'State'   = as.vector(sapply(1:R, function(j) 
-                     apply(ms.prob[,c(j,j+R,j+2*R)],1, which.max) - 1)))
-
-### Plot death counts  + baseline trend
-p1 <- ggplot(tab1) + 
-  theme_bw(base_size = 15) + 
-  geom_line(aes(x = Date, y = Deaths), col = 'black', linewidth = 1, alpha = 0.1) + 
-  geom_line(aes(x = Date, y = bDeaths), col = ared, linewidth = 0.9)
-
-ggsave(plot = p1,
-       filename = paste0('C:/Users/u0131219/OneDrive - KU Leuven/Documents/Reserving phd/Papers/Paper 5 - climate and influenza shocks/Figures/weeklydeaths.pdf'),
-       width = 6, height = 4)  
-
-### Plot conditional probabilities
-p21 <- ggplot(tab1) + 
-  theme_bw(base_size = 15) + 
-  geom_line(aes(x = Date, y = Prob1, col = ablue), linewidth = 0.7, alpha = 0.75) + 
-  geom_line(aes(x = Date, y = Tind95, col = ared), linewidth = 0.7) + 
-  ylab('Smoothed marginal state prob.') + 
-  scale_color_manual(values = c(ablue, ared), name = '',
-                     labels = c(bquote('P(S'[t]~'=1 | D'['t']~', X'['t']~')'),'w_avg_Tind95')) + 
-  theme(legend.position = 'bottom')
-
-p22 <- ggplot(tab1) + 
-  theme_bw(base_size = 15) + 
-  geom_line(aes(x = Date, y = Prob2, col = ablue), linewidth = 0.7, alpha = 0.75) + 
-  geom_line(aes(x = Date, y = Flu, col = ared), linewidth = 0.7) + 
-  ylab('Smoothed marginal state prob.') + 
-  scale_color_manual(values = c(ablue, ared), name = '',
-                     labels = c(bquote('P(S'[t]~'=2 | D'['t']~', X'['t']~')'),'Flu')) + 
-  theme(legend.position = 'bottom')
-
-p2 <- ggpubr::ggarrange(p21, p22, nrow = 1)
-
-ggsave(plot = p2,
-       filename = paste0('C:/Users/u0131219/OneDrive - KU Leuven/Documents/Reserving phd/Papers/Paper 5 - climate and influenza shocks/Figures/mstateprob.pdf'),
-       width = 8, height = 4)  
-
-### States on death count time series
-tab1r <- tab1 %>% dplyr::filter(Region == regions[19] & Age == 'Y_GE90')
-p3 <- ggplot(tab1r) + 
-  theme_bw(base_size = 15) + ylab('Death counts') + 
-  geom_rect(aes(xmin = Date - 3.5, xmax = Date + 3.5, ymin = min(Deaths)-100, 
-                ymax = max(Deaths) + 100, fill = as.factor(State)), alpha = 0.4) + 
-  scale_fill_manual(values = brewer.pal(3,'Dark2'), name = 'State') +
-  geom_line(aes(x = Date, y = bDeaths), col = 'red') + 
-  geom_line(aes(x = Date, y = Deaths), col = 'gray20') +
-  theme(legend.position = 'bottom') + 
-  coord_cartesian(ylim = c(min(tab1r$Deaths), max(tab1r$Deaths)))
-p3
-
-ggsave(plot = p3,
-       filename = paste0('C:/Users/u0131219/OneDrive - KU Leuven/Documents/Reserving phd/Papers/Paper 5 - climate and influenza shocks/Figures/mstateprobdeaths.pdf'),
-       width = 7, height = 4.5)  
-

@@ -16,7 +16,7 @@ invisible(sapply(packages, require, character.only = TRUE))
 setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
 
 # Load
-load("Results/EMresult_tau10.RDATA")
+load("Results/EMresult_tau1.RDATA")
 
 
 ##### 1) Load baseline fit ----
@@ -34,6 +34,7 @@ Xd     <- dgamb %>% dplyr::select(-c('Date', 'ISOYear', 'ISOWeek', 'Region', 'Ag
                                      'fcos26', 'Time')) %>% SparseM::as.matrix()
 rm(fitb)
 gc()
+
 ##### 2) Parameter estimates RS model -----
 
 # Object

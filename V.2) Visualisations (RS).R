@@ -38,7 +38,7 @@ apurple<- '#B1516D'
 ##### 1) Parameter estimates ----
 
 # Optimal precision parameter
-tau <- 10
+tau <- 1
 
 # Load output RS model
 load(paste0("Results/EMresult_tau", tau, ".Rdata"))
@@ -101,9 +101,9 @@ plot_isf <- function(r, a, agegr){
                          'Deaths' = as.vector(dt[,r]),
                          'bDeaths' = as.vector(bt[,r]),
                          'State' = apply(ms.prob[,c(r,r+R,r+2*R)],1, which.max) - 1,
-                         'Age' = rep(unique(df$Age0), each = nT),
+                         'Age' = rep(unique(df$Age), each = nT),
                          'Region' = regions[r]) %>%
-    dplyr::filter(Age == unique(df$Age0)[a]) %>%
+    dplyr::filter(Age == unique(df$Age)[a]) %>%
     dplyr::mutate('RSDeaths' = (State == 0) * bDeaths + 
                     (State == 1) * bDeaths * exp(x1[((a-1)*nT+1):(a*nT),,r] %*% alpha1.opt) + 
                     (State == 2) * bDeaths * exp(x2[((a-1)*nT+1):(a*nT),,r] %*% alpha2.opt))
@@ -164,25 +164,50 @@ p2.2 <- ggplot() +
 p2.2
 
 ### 2.3) Parameter estimates (alpha) ----
-df.alpha1 <- data.frame('a1' = alpha1.opt, 
-                        'Age' = factor(c( rep(c('Y65-74','Y75-84','Y_GE85'),
-                                              times = 3)),
-                                       levels = c('Y65-74','Y75-84','Y_GE85')),
-                        'Var' = factor(c(rep(c('HI','HI1','HI2','TA','TA1', 'TA2'), 
-                                             each = 3)),
-                                       levels = c('TA','TA1','TA2','HI','HI1','HI2')),
-                        'SE' = sqrt(diag(COV.alpha))[1:length(alpha1.opt)])
+# Colour scales
+panel  <- c("#9D7660", '#B1516D', "#F28E2B", 
+            '#56B4E9', '#A3D596', '#F8766D')
+blue   <- '#56B4E9'
+green  <- '#A3D596'
+red    <- '#F8766D'
+purple <- '#B1516D'
+
+ages.alpha1 <- sub(".*(Y[0-9]{2}-[0-9]{2}|Y_GE90).*", "\\1", names(alpha1.opt))
+ages.alpha2 <- sub(".*(Y[0-9]{2}-[0-9]{2}|Y_GE90).*", "\\1", names(alpha2.opt))
+ages.alpha1[!grepl("Y", ages.alpha1)] <- "INT"
+ages.alpha2[!grepl("Y", ages.alpha2)] <- "INT"
+
+vars.alpha1 <- gsub("AgeY65-69|AgeY70-74|AgeY75-79|AgeY80-84|AgeY85-89|AgeY_GE90", 
+                    "", names(alpha1.opt))
+vars.alpha1 <- gsub("^:|:$", "", gsub("::", ":", vars.alpha1))
+vars.alpha1[vars.alpha1 == "(Intercept)"] <- "INT"
+
+vars.alpha2 <- gsub("AgeY65-69|AgeY70-74|AgeY75-79|AgeY80-84|AgeY85-89|AgeY_GE90", 
+                    "", names(alpha2.opt))
+vars.alpha2 <- gsub("^:|:$", "", gsub("::", ":", vars.alpha2))
+vars.alpha2[vars.alpha2 == "(Intercept)"] <- "INT"
+
+df.alpha1 <- data.frame('a1'  = alpha1.opt, 
+                        'Age' = factor(ages.alpha1, levels = c('INT', levels(df$Age))),
+                        'Var' = factor(vars.alpha1),
+                        'SE' = sqrt(diag(COV.alpha))[1:length(alpha1.opt)]) %>%
+  dplyr::mutate('lower' = a1 - 1.96*SE,
+                'upper' = a1 + 1.96*SE,
+                'Signif'   = ! (lower < 0 & upper > 0))
+
 
 df.alpha2 <- data.frame('a2'  = alpha2.opt, 
-                        'Age' = factor(c(rep(c('Y65-74','Y75-84','Y_GE85'), 
-                                             times = 6)),
-                                       levels = c('Y65-74','Y75-84','Y_GE85')),
-                        'Var' = factor(c(rep(c('CI01','CI23','IA01',
-                                               'IA23', 'HA01','HA23'),
-                                             each = 3)),
-                                       levels = c('IA01', 'IA23', 'CI01', 
-                                                  'CI23', 'HA01', 'HA23')),
-                        'SE' = sqrt(diag(COV.alpha))[-c(1:length(alpha1.opt))])
+                        'Age' = factor(ages.alpha2, levels = c('INT', levels(df$Age))),
+                        'Var' = factor(vars.alpha2,
+                                       levels = c('INT', 'w_avg_eci', 
+                                                  'w_avg_eci_l1', 'w_avg_eci_l2.3',
+                                                  'ia100q', 'ia100q_l1', 'ia100q_l2.3',
+                                                  'Nhospq', 'Nhospq_l1', 'Nhospq_l2.3',
+                                                  'w_avg_eci:Nhospq', 'w_avg_eci_l1:Nhospq_l1')),
+                        'SE' = sqrt(diag(COV.alpha))[-c(1:length(alpha1.opt))]) %>%
+  dplyr::mutate('a2.lower' = a2 - 1.96*SE,
+                'a2.upper' = a2 + 1.96*SE,
+                'Signif'   = ! (a2.lower < 0 & a2.upper > 0))
 
 
 p.alpha1 <- ggplot(df.alpha1, aes(x = Var, y = a1, group = Age, color = Age)) + 
@@ -193,19 +218,17 @@ p.alpha1 <- ggplot(df.alpha1, aes(x = Var, y = a1, group = Age, color = Age)) +
                 size = 1.1) + 
   geom_pointrange(aes(ymin = a1 - 1.96*SE, ymax = a1 + 1.96*SE),
                   position = position_dodge(0.55)) +
-  scale_color_manual(name = 'Age', 
-                     values = c('Y65-74' = ablue, 'Y75-84' = ared, 'Y_GE85' = agreen),
-                     labels = c('Y65-74' = '65-74', 'Y75-84' = '75-84', 
-                                'Y_GE85' = '85+')) + 
-  scale_x_discrete(labels = c('HI' = bquote('HI'['t']),
-                              'HI1' = bquote('HI'['t-1']),
-                              'HI2' = bquote('HI'['t-2']),
-                              'TA' = bquote('TA'['t']), 
-                              'TA1' = bquote('TA'['t-1']), 
-                              'TA2' = bquote('TA'['t-2']))) + 
+  scale_color_manual(name   = '', 
+                     values = c('black', panel),
+                     labels = gsub('Y|_', "", levels(df.alpha1$Age))) + 
+  scale_x_discrete(labels = c('INT' = 'INT',
+                              'w_avg_ehi' = bquote('EHI'['t']),
+                              'w_avg_ehi_l1' = bquote('EHI'['t-1']))) + 
   theme(legend.position = 'bottom',
         axis.text.x = element_text(angle = 30, vjust = 0.75)) + 
-  ggtitle('Environmental shock state')
+  guides(fill = guide_legend(direction = "horizontal"),
+         color = guide_legend(nrow = 1)) + 
+  ggtitle('Summer shock state')
 
 p.alpha2 <- ggplot(df.alpha2, aes(x = Var, y = a2, group = Age, color = Age)) + 
   theme_bw(base_size = 15) + ylab(bquote(alpha['2'])) + xlab('') +
@@ -216,47 +239,51 @@ p.alpha2 <- ggplot(df.alpha2, aes(x = Var, y = a2, group = Age, color = Age)) +
   geom_pointrange(aes(ymin = a2 - 1.96*SE, ymax = a2 + 1.96*SE),
                   position = position_dodge(0.55)) +
   scale_color_manual(name = 'Age', 
-                     values = c('Y65-74' = ablue, 'Y75-84' = ared, 
-                                'Y_GE85' = agreen),
-                     labels = c('Y65-74' = '65-74', 'Y75-84' = '75-84', 
-                                'Y_GE85' = '85+')) + 
-  scale_x_discrete(labels = c('HA01'  = bquote('HA'['t,t-1']), 
-                              'HA23'  = bquote('HA'['t-2,t-3']), 
-                              'CI01' = bquote('CI'['t,t-1']),
-                              'CI23'  = bquote('CI'['t-2,t-3']),
-                              'IA01'  = bquote('IA'['t,t-1']),
-                              'IA23'  = bquote('IA'['t-2,t-3']))) + 
+                     values = c('black', panel),
+                     labels = gsub('Y|_', "", levels(df.alpha1$Age))) + 
+  scale_x_discrete(labels = c('INT' = 'INT', 
+                              'Nhospq'  = bquote('HA'['t']), 
+                              'Nhospq_l1' = bquote('HA'['t-1']),
+                              'w_avg_eci'   = bquote('ECI'['t']),
+                              'w_avg_eci_l1'   = bquote('ECI'['t-1']),
+                              'w_avg_eci_l2.3'  = bquote('ECI'['t-2,t-3']),
+                              'ia100q'  = bquote('IA'['t']),
+                              'ia100q_l1'  = bquote('IA'['t-1']),
+                              'ia100q_l2.3'  = bquote('IA'['t-2,t-3']),
+                              'w_avg_eci:Nhospq' = bquote('ECI'['t']*':HA'['t']),
+                              'w_avg_eci_l1:Nhospq_l1' = bquote('ECI'['t-1']*':HA'['t-1']))) + 
   theme(legend.position = 'bottom',
         axis.text.x = element_text(angle = 30, vjust = 0.75)) + 
-  ggtitle('Respiratory shock state')
+  ggtitle('Winter shock state')
 
 
-p2.3 <- ggpubr::ggarrange(plotlist = list(p.alpha1, p.alpha2), 
-                          widths = c(0.4,0.6), align = 'hv',
-                          common.legend = TRUE,
-                          legend = 'bottom')
-p2.3
+p.alpha <- ggpubr::ggarrange(plotlist = list(p.alpha1, p.alpha2), 
+                             widths = c(0.4,0.6), align = 'hv',
+                             common.legend = TRUE, nrow = 2,
+                             legend = 'bottom')
+
+p.alpha
 
 ### 2.4) Parameter estimates (beta) ----
 df.b01 <- data.frame('Val' = beta01.opt, 
-                     'Var' = factor(c('INT', rep(c('HI'))),
-                                    levels = c('INT','HI')),
+                     'Var' = factor(c('INT', rep(c('w_avg_ehi'))),
+                                    levels = c('INT','w_avg_ehi')),
                      'SE' = sqrt(diag(COV.beta))[1:length(beta01.opt)])
 df.b02 <- data.frame('Val' = beta02.opt, 
-                     'Var' = factor(c('INT', c('IA01','HA01')),
-                                    levels = c('INT','IA01', 'HA01')),
+                     'Var' = factor(c('INT', c('w_avg_eci')),
+                                    levels = c('INT','w_avg_eci')),
                      'SE' = sqrt(diag(COV.beta))[(length(beta01.opt)+1):
                                                    (length(beta02.opt) + 
                                                       length(beta01.opt))])
 df.b11 <- data.frame('Val' = beta11.opt, 
-                     'Var' = factor(c('INT', rep(c('HI','HI1', 'HI2'))),
-                                    levels = c('INT','HI','HI1','HI2')),
+                     'Var' = factor(c('INT', rep(c('w_avg_ehi'))),
+                                    levels = c('INT','w_avg_ehi')),
                      'SE' = sqrt(diag(COV.beta))[(length(beta0.opt)+1):
                                                    (length(beta0.opt)+
                                                       length(beta11.opt))])
 df.b22 <- data.frame('Val' = beta22.opt, 
-                     'Var' = factor(c('INT', c('IA01','HA01', 'IA23','HA23')),
-                                    levels = c('INT','IA01','IA23', 'HA01', 'HA23')),
+                     'Var' = factor(c('INT', c('w_avg_eci_l2.3')),
+                                    levels = c('INT','w_avg_eci_l2.3')),
                      'SE' = sqrt(diag(COV.beta))[-c(1:length(c(beta0.opt,beta11.opt)))])
 
 
@@ -269,12 +296,10 @@ p.b01 <- ggplot(df.b01, aes(x = Var, y = Val)) +
   geom_pointrange(aes(ymin = Val - 1.96*SE, ymax = Val + 1.96*SE),
                   position = position_dodge(0.55), col = ared) +
   scale_x_discrete(labels = c('INT' = 'INT', 
-                              'HI' = bquote('HI'['t']), 
-                              'HI1' = bquote('HI'['t-1']), 
-                              'HI2' = bquote('HI'['t-2']))) +
+                              'w_avg_ehi' = bquote('EHI'['t']))) +
   theme(legend.position = 'bottom',
         axis.text.x = element_text(angle = 30, vjust = 0.75)) + 
-  ggtitle(expression('Baseline' %->% 'Env. shock state'))
+  ggtitle(expression('Baseline' %->% 'Summer shock state'))
 
 p.b02 <- ggplot(df.b02, aes(x = Var, y = Val)) + 
   theme_bw(base_size = 15) + ylab(bquote(beta['02'])) + xlab('') +
@@ -285,13 +310,10 @@ p.b02 <- ggplot(df.b02, aes(x = Var, y = Val)) +
   geom_pointrange(aes(ymin = Val - 1.96*SE, ymax = Val + 1.96*SE),
                   position = position_dodge(0.55), col = ared) +
   scale_x_discrete(labels = c('INT' = 'INT', 
-                              'HA01' = bquote('HA'['t,t-1']), 
-                              'HA23' = bquote('HA'['t-2,t-3']), 
-                              'IA01' = bquote('IA'['t,t-1']),
-                              'IA23' = bquote('IA'['t-2,t-3']))) + 
+                              'w_avg_eci' = bquote('ECI'['t']))) + 
   theme(legend.position = 'bottom',
         axis.text.x = element_text(angle = 30, vjust = 0.75)) + 
-  ggtitle(expression('Baseline' %->% 'Respiratory shock state'))
+  ggtitle(expression('Baseline' %->% 'Winter shock state'))
 
 p.b11 <- ggplot(df.b11, aes(x = Var, y = Val)) + 
   theme_bw(base_size = 15) + ylab(bquote(beta['11'])) + xlab('') +
@@ -302,12 +324,10 @@ p.b11 <- ggplot(df.b11, aes(x = Var, y = Val)) +
   geom_pointrange(aes(ymin = Val - 1.96*SE, ymax = Val + 1.96*SE),
                   position = position_dodge(0.55), col = ared) +
   scale_x_discrete(labels = c('INT' = 'INT', 
-                              'HI' = bquote('HI'['t']), 
-                              'HI1' = bquote('HI'['t-1']), 
-                              'HI2' = bquote('HI'['t-2']))) +
+                              'w_avg_ehi' = bquote('EHI'['t']))) +
   theme(legend.position = 'bottom',
         axis.text.x = element_text(angle = 30, vjust = 0.75)) + 
-  ggtitle(expression('Env. shock state' %->% 'Env. shock state'))
+  ggtitle(expression('Summer shock state' %->% 'Summer shock state'))
 
 p.b22 <- ggplot(df.b22, aes(x = Var, y = Val)) + 
   theme_bw(base_size = 15) + ylab(bquote(beta['22'])) + xlab('') +
@@ -318,18 +338,15 @@ p.b22 <- ggplot(df.b22, aes(x = Var, y = Val)) +
   geom_pointrange(aes(ymin = Val - 1.96*SE, ymax = Val + 1.96*SE),
                   position = position_dodge(0.55), col = ared) +
   scale_x_discrete(labels = c('INT' = 'INT', 
-                              'HA01' = bquote('HA'['t,t-1']), 
-                              'HA23' = bquote('HA'['t-2,t-3']), 
-                              'IA01' = bquote('IA'['t,t-1']),
-                              'IA23' = bquote('IA'['t-2,t-3']))) + 
+                              'w_avg_eci_l2.3' = bquote('ECI'['t-2,t-3']))) + 
   theme(legend.position = 'bottom',
         axis.text.x = element_text(angle = 30, vjust = 0.75)) + 
-  ggtitle(expression('Respiratory shock state' %->% 'Respiratory shock state'))
+  ggtitle(expression('Winter shock state' %->% 'Winter shock state'))
 
-p2.4 <- ggpubr::ggarrange(plotlist = list(p.b01, p.b02, p.b11, p.b22), 
-                          widths = c(0.4,0.6), align = 'hv',
-                          nrow = 2, ncol = 2)
-p2.4
+p.beta <- ggpubr::ggarrange(plotlist = list(p.b01, p.b02, p.b11, p.b22), 
+                            align = 'hv',
+                            nrow = 2, ncol = 2)
+p.beta
 
 ### 2.5) Uncertainty in in-sample fit ----
 

@@ -22,7 +22,7 @@ source('Functions/F. Population Weights.R')
 # Country/countries of interest
 ctry.spec <- c("FR")
 
-##### 1) Load shape file NUTS 2 European regions ----
+##### 1) Load shape file NUTS 3 European regions ----
 
 # Read shape file - downloaded from Eurostat
 shapefile <- read_sf('Shapefile Eurostat NUTS/NUTS_RG_20M_2021_3035.shp')
@@ -45,14 +45,14 @@ coords_ctry <- st_coordinates(st_transform(shapef, 4326)) %>%
 long.range <- range(coords_ctry[,1])
 lat.range  <- range(coords_ctry[,2])
 
-##### 2) Download E-OBS data (CDS) ----
+##### 2) Read E-OBS data ----
 
 # Select weather variable
 var      <- 'tg'
 var_name <- 'mean_temperature'
 
 # Login details - create account on CDS and fill in your API token 
-wf_set_key(key = '....')
+wf_set_key(key = '')
 
 # Request information
 request <- list(
@@ -83,8 +83,8 @@ lfile <- paste0(var, "_ens_mean_0.1deg_reg_2011-2024_v30.0e.nc")
 # Create account on EarthData (https://urs.earthdata.nasa.gov/) 
 
 # Replace with your EarthData credentials
-username <- "...."
-password <- "...."
+username <- "..."
+password <- "..."
 
 # URL of the data
 url <- paste0("https://sedac.ciesin.columbia.edu/downloads",
@@ -137,9 +137,9 @@ id.long <- which(nc_ds$dim$longitude$vals >= long.range[1] &
                    nc_ds$dim$longitude$vals <= long.range[2])
 id.lat  <- which(nc_ds$dim$latitude$vals >= lat.range[1] &
                    nc_ds$dim$latitude$vals <= lat.range[2])
-id.time <- which(nc_ds$dim$time$vals >=  as.Date('2013-01-01') - 
+id.time <- which(nc_ds$dim$time$vals >=  as.Date('2012-12-31') - 
                    as.Date('1950-01-01') & nc_ds$dim$time$vals <= 
-                   as.Date('2024-12-31') - as.Date('1950-01-01'))
+                   as.Date('2024-10-01') - as.Date('1950-01-01'))
 long    <- long[id.long]
 lat     <- lat[id.lat]
 date    <- date[id.time]
@@ -214,6 +214,7 @@ df.region.CLI <- sapply(coord.region, function(sub)
 
 
 ### 4.5) Function to transform matrix to long data frame r (see ribiosUtils) ----
+
 df.region.CLI.daily  <- matrix2longdf(df.region.CLI,
                                       longdf.colnames = c('Date', 'Region', var))  
 
@@ -223,7 +224,3 @@ df.region.CLI.daily$Date <- as.Date(df.region.CLI.daily$Date)
 file.save <- paste0("Data/E-OBS/",
                     paste0(ctry.spec, collapse = '_'),'_NUTS2_',var,'_daily','.rds')
 saveRDS(df.region.CLI.daily, file = file.save)
-
-
-
-

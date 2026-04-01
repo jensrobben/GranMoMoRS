@@ -52,10 +52,10 @@ lat.range  <- range(coords_ctry[,2])
 ##### 2) Download Sentinel data ----
 
 # URL to French Sentinel influenza data
-url_ia <- 'https://www.sentiweb.fr/datasets/all/inc-3-REG.csv'
+file_ia <- 'Data/SENTIWEB/inc-3-REG.csv'
 
 # Read (no data for overseas region 'OUTRE-MER)
-df_ia <- read.csv(url_ia, header = TRUE, skip = 1) %>%
+df_ia <- read.csv(file_ia, header = TRUE, sep = c(';')) %>%
   mutate('ISOYear' = as.integer(substr(week, 1, 4)),
          'ISOWeek' = as.integer(substr(week, 5, 6)),
          'Date'    = ISOweek2date(sprintf("%d-W%02d-%d", ISOYear, ISOWeek, 1)),

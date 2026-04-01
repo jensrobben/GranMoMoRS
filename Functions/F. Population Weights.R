@@ -114,7 +114,7 @@ get_pop_weights <- function(ctry.spec, long.ext, lat.ext){
     newdf[,c('Longitude','Latitude','Region')]
   df$Ind <- as.numeric(rownames(df))
 
-  df <- df %>% select(-c('Region.ext'))
+  df <- df %>% dplyr::select(-c('Region.ext'))
   
   i1 <- match(df$Longitude, long)
   i2 <- match(df$Latitude, lat)
